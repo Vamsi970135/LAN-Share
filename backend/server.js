@@ -206,12 +206,13 @@ const io = new Server(server, {
 const socketHandler = initSocket(io);
 
 // ================= START SERVER =================
+// ================= START SERVER =================
 const PORT = process.env.PORT || 5000;
 
-server.listen(PORT, () => {
+server.listen(PORT, "0.0.0.0", () => {
     console.log("===========================================");
     console.log("🚀 Secure LAN File Share Server Started");
-    console.log("🌐 Open Browser → http://localhost:" + PORT);
+    console.log("🌐 Server listening on 0.0.0.0:" + PORT);
     console.log("📡 Socket.IO + Auth + Upload + LAN Discovery Ready");
     console.log("===========================================");
 
@@ -221,11 +222,20 @@ server.listen(PORT, () => {
             console.log("✅ IPFS node online | ID:", status.id);
             console.log("   Version:", status.version);
         } else {
-            console.warn("⚠️  IPFS node NOT reachable at", process.env.IPFS_API_URL || "http://127.0.0.1:5001");
-            console.warn("   Open IPFS Desktop and make sure its node is running (tray icon = active).");
+            console.warn(
+                "⚠️ IPFS node NOT reachable at",
+                process.env.IPFS_API_URL || "http://127.0.0.1:5001"
+            );
+            console.warn(
+                "   Open IPFS Desktop and make sure its node is running."
+            );
         }
     });
 
     // Start LAN UDP peer discovery
-    discovery.start({ port: PORT, username: 'Server', userId: 'server' });
+    discovery.start({
+        port: PORT,
+        username: "Server",
+        userId: "server"
+    });
 });
