@@ -140,6 +140,7 @@ function start(info) {
     myInfo = {
         ip:       getLocalIP(),
         port:     info.port,
+        ftpPort:  info.ftpPort || 2121,
         username: info.username || 'Server',
         userId:   info.userId   || 'server'
     };
@@ -171,6 +172,7 @@ function start(info) {
             const peer = {
                 ip:       data.ip || rinfo.address,
                 port:     data.port,
+                ftpPort:  data.ftpPort || 2121,
                 username: data.username,
                 userId:   data.userId,
                 lastSeen: Date.now()
@@ -202,6 +204,7 @@ function start(info) {
                 type:     'lan-peer-announce',
                 ip:       myInfo.ip,
                 port:     myInfo.port,
+                ftpPort:  myInfo.ftpPort || 2121,
                 username: myInfo.username,
                 userId:   myInfo.userId
             }));

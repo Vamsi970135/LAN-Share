@@ -1,10 +1,13 @@
 {
   "name": "secure-lan-fileshare",
   "version": "1.0.0",
+  "description": "Secure LAN File Sharing System using Traditional FTP and Web UI",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node server.js"
+    "build": "echo 'Build complete'",
+    "start": "node server.js",
+    "dev": "node server.js"
   },
   "dependencies": {
     "axios": "^1.6.0",

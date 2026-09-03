@@ -34,7 +34,7 @@ document.addEventListener("DOMContentLoaded", () => {
                         <p class="text-white font-semibold">${peer.username}</p>
                         <p class="text-blue-200 text-sm flex items-center gap-1">
                             <span class="w-2 h-2 bg-green-400 rounded-full inline-block animate-pulse"></span>
-                            Online &nbsp;·&nbsp; <span class="font-mono text-xs">${peer.ip}:${peer.port}</span>
+                            Online &nbsp;·&nbsp; <span class="font-mono text-xs">HTTP ${peer.ip}:${peer.port} · FTP :${peer.ftpPort || 2121}</span>
                         </p>
                     </div>
                 </div>

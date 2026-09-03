@@ -1,11 +1,11 @@
-const db         = require('../database.js');
-const mime       = require('mime-types');
-const CryptoJS   = require('crypto-js');
-const axios      = require('axios');
-const discovery  = require('../lan-discovery');
+const db = require('../database.js');
+const mime = require('mime-types');
+const CryptoJS = require('crypto-js');
+const axios = require('axios');
+const discovery = require('../lan-discovery');
 
-const { uploadToIPFS, downloadFromIPFS } = require('../config/ipfs.js');
-const { addBlock }                        = require('../ledger/blockchain.js');
+const { uploadToFTP, downloadFromFTP, getFTPStatus, listFTPFiles, FTP_PORT } = require('../config/ftp.js');
+const { addBlock } = require('../ledger/blockchain.js');
 
 // ─────────────────────────────────────────────────────────────
 // HELPER — extract userId from JWT header
@@ -15,10 +15,10 @@ function getUserId(req) {
     const authHeader = req.headers['authorization'];
     if (authHeader) {
         try {
-            const token   = authHeader.split(' ')[1];
+            const token = authHeader.split(' ')[1];
             const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
             userId = payload.id;
-        } catch(e) {}
+        } catch (e) {}
     }
     return userId;
 }
@@ -26,8 +26,8 @@ function getUserId(req) {
 // ─────────────────────────────────────────────────────────────
 // UPLOAD FILE
 //   1. AES-encrypt the file
-//   2. Upload encrypted buffer to IPFS → get real Qm... CID
-//   3. Save CID + key to DB
+//   2. Store encrypted buffer in FTP storage directory
+//   3. Save CID (transfer code) + key to DB
 //   4. Broadcast CID+key to all discovered LAN peers
 // ─────────────────────────────────────────────────────────────
 exports.uploadFile = async (req, res) => {
@@ -37,34 +37,34 @@ exports.uploadFile = async (req, res) => {
         const userId = getUserId(req);
 
         // AES encrypt
-        const key        = CryptoJS.lib.WordArray.random(16).toString();
+        const key = CryptoJS.lib.WordArray.random(16).toString();
         const base64Data = req.file.buffer.toString('base64');
-        const encrypted  = CryptoJS.AES.encrypt(base64Data, key).toString();
-        const encBuf     = Buffer.from(encrypted);
+        const encrypted = CryptoJS.AES.encrypt(base64Data, key).toString();
+        const encBuf = Buffer.from(encrypted);
 
-        // Upload to IPFS — returns a real Qm... CID
-        const cid = await uploadToIPFS(encBuf, req.file.originalname);
-
+        // Upload to Traditional FTP storage
+        const uploadResult = await uploadToFTP(encBuf, req.file.originalname);
+        const cid = uploadResult.cid;
         const myInfo = discovery.getMyInfo();
 
         // Save to DB
         db.run(
             'INSERT INTO files(userId, filename, cid, size, encryptionKey, ownerIp, ownerPort) VALUES(?,?,?,?,?,?,?)',
-            [userId, req.file.originalname, cid, req.file.size, key, myInfo.ip || null, myInfo.port || 5000],
-            function(err) {
+            [userId, req.file.originalname, cid, req.file.size, key, myInfo.ip || null, myInfo.port || 3000],
+            function (err) {
                 if (err) console.error('[DB] Insert error:', err);
             }
         );
 
         addBlock({
-            action:    'UPLOAD',
-            filename:  req.file.originalname,
+            action: 'UPLOAD_FTP',
+            filename: req.file.originalname,
             cid,
-            size:      req.file.size,
+            size: req.file.size,
             timestamp: new Date().toISOString()
         });
 
-        console.log('[Upload] File:', req.file.originalname, '| CID:', cid);
+        console.log('[Upload] File:', req.file.originalname, '| Transfer Code:', cid, '| Stored on FTP');
 
         // ── Broadcast CID + key to all active LAN peers ──────
         const peers = discovery.getActivePeers();
@@ -72,32 +72,34 @@ exports.uploadFile = async (req, res) => {
             axios.post(`http://${peer.ip}:${peer.port}/api/files/register-cid`, {
                 cid,
                 key,
-                filename:  req.file.originalname,
-                size:      req.file.size,
-                ownerIp:   myInfo.ip,
-                ownerPort: myInfo.port || 5000
+                filename: req.file.originalname,
+                size: req.file.size,
+                ownerIp: myInfo.ip,
+                ownerPort: myInfo.port || 3000,
+                ftpPort: FTP_PORT
             })
-            .then(()  => console.log('[Upload] CID broadcasted to peer:', peer.ip + ':' + peer.port))
-            .catch(e  => console.warn('[Upload] Could not broadcast to peer:', peer.ip, '-', e.message));
+            .then(() => console.log('[Upload] Transfer Code broadcasted to peer:', peer.ip + ':' + peer.port))
+            .catch(e => console.warn('[Upload] Could not broadcast to peer:', peer.ip, '-', e.message));
         });
 
-        res.json({ message: 'File uploaded successfully', cid, key });
+        res.json({
+            message: 'File uploaded successfully to FTP storage',
+            cid,
+            key,
+            filename: req.file.originalname,
+            size: req.file.size,
+            ftpPort: FTP_PORT,
+            ftpUrl: `ftp://${myInfo.ip || '127.0.0.1'}:${FTP_PORT}/${uploadResult.storageFilename}`
+        });
 
     } catch (err) {
         console.error('[Upload] Error:', err.message);
-
-        // Give a clear message if IPFS node is not running
-        if (err.message.includes('IPFS Desktop') || err.message.includes('ECONNREFUSED')) {
-            return res.status(503).json({
-                error: 'IPFS Desktop is not running. Please open IPFS Desktop and wait for the node to start, then try again.'
-            });
-        }
         res.status(500).json({ error: 'Upload failed: ' + err.message });
     }
 };
 
 // ─────────────────────────────────────────────────────────────
-// REGISTER CID  (peer B receives CID+key from peer A and saves it)
+// REGISTER CID / TRANSFER CODE (peer B receives CID+key from peer A and saves it)
 // ─────────────────────────────────────────────────────────────
 exports.registerCid = (req, res) => {
     const { cid, key, filename, size, ownerIp, ownerPort } = req.body;
@@ -113,27 +115,27 @@ exports.registerCid = (req, res) => {
             // Already registered — update ownerIp if we got a better one
             if (ownerIp) {
                 db.run('UPDATE files SET ownerIp=?, ownerPort=? WHERE cid=?',
-                    [ownerIp, ownerPort || 5000, cid]);
+                    [ownerIp, ownerPort || 3000, cid]);
             }
-            return res.json({ message: 'CID already registered', cid });
+            return res.json({ message: 'Transfer Code already registered', cid });
         }
 
         if (row && !row.ownerIp && ownerIp) {
             db.run('UPDATE files SET ownerIp=?, ownerPort=? WHERE cid=?',
-                [ownerIp, ownerPort || 5000, cid]);
-            return res.json({ message: 'CID owner updated', cid });
+                [ownerIp, ownerPort || 3000, cid]);
+            return res.json({ message: 'Owner updated for Transfer Code', cid });
         }
 
         db.run(
             'INSERT INTO files(userId, filename, cid, size, encryptionKey, ownerIp, ownerPort) VALUES(?,?,?,?,?,?,?)',
-            [userId, filename, cid, size || 0, key, ownerIp || null, ownerPort || 5000],
-            function(err) {
+            [userId, filename, cid, size || 0, key, ownerIp || null, ownerPort || 3000],
+            function (err) {
                 if (err) {
                     console.error('[registerCid] DB error:', err);
-                    return res.status(500).json({ error: 'Failed to register CID' });
+                    return res.status(500).json({ error: 'Failed to register file code' });
                 }
                 console.log('[registerCid] Registered:', filename, '|', cid, '| from:', ownerIp);
-                res.json({ message: 'CID registered successfully', cid });
+                res.json({ message: 'File registered successfully', cid });
             }
         );
     });
@@ -142,7 +144,7 @@ exports.registerCid = (req, res) => {
 // ─────────────────────────────────────────────────────────────
 // DOWNLOAD FILE
 //   1. Look up CID in DB to get the encryption key
-//   2. Fetch encrypted content from IPFS using the CID
+//   2. Fetch encrypted content from traditional FTP storage
 //   3. Decrypt and stream back to the browser
 // ─────────────────────────────────────────────────────────────
 exports.downloadFile = async (req, res) => {
@@ -150,38 +152,49 @@ exports.downloadFile = async (req, res) => {
         const cid = req.params.cid;
 
         db.get(
-            'SELECT filename, encryptionKey FROM files WHERE cid=?',
+            'SELECT filename, encryptionKey, ownerIp, ownerPort FROM files WHERE cid=?',
             [cid],
             async (err, row) => {
-                if (err)  return res.status(500).json({ message: 'Database error' });
-                if (!row) return res.status(404).json({
-                    message: 'CID not found in your database. Ask the sender to share it, or use "Register CID" to add it manually.'
-                });
+                if (err) return res.status(500).json({ message: 'Database error' });
+                if (!row) {
+                    return res.status(404).json({
+                        message: 'File code not found in your database. Ask the sender to share it, or use "Register CID" to add it manually.'
+                    });
+                }
 
-                const { filename, encryptionKey: key } = row;
+                const { filename, encryptionKey: key, ownerIp, ownerPort } = row;
                 const contentType = mime.lookup(filename) || 'application/octet-stream';
 
-                // Fetch encrypted bytes from IPFS
+                // Fetch encrypted bytes from local FTP storage or remote peer fallback
                 let encryptedText;
                 try {
-                    const buf = await downloadFromIPFS(cid);
+                    const buf = await downloadFromFTP(cid);
                     encryptedText = buf.toString();
-                } catch (ipfsErr) {
-                    console.error('[Download] IPFS fetch error:', ipfsErr.message);
+                } catch (ftpErr) {
+                    console.warn('[Download] Local FTP fetch failed, checking peer fallback:', ftpErr.message);
 
-                    if (ipfsErr.message.includes('IPFS Desktop') || ipfsErr.message.includes('ECONNREFUSED')) {
-                        return res.status(503).json({
-                            message: 'IPFS Desktop is not running. Please open IPFS Desktop and wait for the node to start, then try again.'
-                        });
+                    // If file is stored on a peer's server, attempt to fetch from peer
+                    if (ownerIp && ownerPort) {
+                        try {
+                            const peerUrl = `http://${ownerIp}:${ownerPort}/api/files/download/${encodeURIComponent(cid)}`;
+                            console.log('[Download] Fetching from peer:', peerUrl);
+                            const peerRes = await axios.get(peerUrl, { responseType: 'arraybuffer', timeout: 8000 });
+                            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+                            res.setHeader('Content-Type', contentType);
+                            return res.send(Buffer.from(peerRes.data));
+                        } catch (peerErr) {
+                            console.error('[Download] Peer fetch also failed:', peerErr.message);
+                        }
                     }
-                    return res.status(502).json({
-                        message: 'Could not fetch file from IPFS: ' + ipfsErr.message
+
+                    return res.status(404).json({
+                        message: 'Could not fetch file from FTP storage: ' + ftpErr.message
                     });
                 }
 
                 // Decrypt
                 try {
-                    const decrypted  = CryptoJS.AES.decrypt(encryptedText, key);
+                    const decrypted = CryptoJS.AES.decrypt(encryptedText, key);
                     const base64Data = decrypted.toString(CryptoJS.enc.Utf8);
 
                     if (!base64Data) {
@@ -193,8 +206,8 @@ exports.downloadFile = async (req, res) => {
                     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
                     res.setHeader('Content-Type', contentType);
 
-                    addBlock({ action: 'DOWNLOAD', filename, cid, timestamp: new Date().toISOString() });
-                    console.log('[Download] Served:', filename, 'CID:', cid);
+                    addBlock({ action: 'DOWNLOAD_FTP', filename, cid, timestamp: new Date().toISOString() });
+                    console.log('[Download] Served:', filename, 'Code:', cid);
                     res.send(originalBuffer);
 
                 } catch (decErr) {
@@ -214,7 +227,7 @@ exports.downloadFile = async (req, res) => {
 exports.getMyFiles = (req, res) => {
     const userId = getUserId(req);
     db.all(
-        'SELECT id, filename, cid, size, encryptionKey as key FROM files WHERE userId=? ORDER BY id DESC',
+        'SELECT id, filename, cid, size, encryptionKey as key, uploadedAt FROM files WHERE userId=? ORDER BY id DESC',
         [userId],
         (err, rows) => {
             if (err) return res.status(500).json({ error: 'DB error' });
@@ -231,12 +244,36 @@ exports.getStats = (req, res) => {
         db.get('SELECT COUNT(*) as totalUsers FROM users', (err, usersRow) => {
             db.get('SELECT SUM(size) as totalSize FROM files', (err, sizeRow) => {
                 res.json({
-                    totalFiles:    filesRow ? filesRow.totalFiles : 0,
-                    totalUsers:    usersRow ? usersRow.totalUsers : 0,
-                    totalSize:     sizeRow && sizeRow.totalSize ? sizeRow.totalSize : 0,
+                    totalFiles: filesRow ? filesRow.totalFiles : 0,
+                    totalUsers: usersRow ? usersRow.totalUsers : 0,
+                    totalSize: sizeRow && sizeRow.totalSize ? sizeRow.totalSize : 0,
                     networkStatus: 'Online'
                 });
             });
         });
     });
+};
+
+// ─────────────────────────────────────────────────────────────
+// FTP SERVER STATUS
+// ─────────────────────────────────────────────────────────────
+exports.getFTPStatus = async (req, res) => {
+    try {
+        const status = await getFTPStatus();
+        res.json(status);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+// ─────────────────────────────────────────────────────────────
+// LIST FTP FILES
+// ─────────────────────────────────────────────────────────────
+exports.listFTPFiles = async (req, res) => {
+    try {
+        const files = await listFTPFiles();
+        res.json({ files });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 };

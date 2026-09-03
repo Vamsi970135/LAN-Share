@@ -1,0 +1,6 @@
+{
+  "name": "Secure LAN File Sharing System",
+  "description": "Secure LAN file sharing system using traditional FTP storage, AES-256 encryption, and local peer discovery.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -9,7 +9,7 @@ const path = require('path');
 const { Server } = require('socket.io');
 
 const db = require('./database.js');
-const { checkIPFSNode } = require('./config/ipfs.js');
+const { startFTPServer, getFTPStatus, FTP_PORT } = require('./config/ftp.js');
 const discovery = require('./lan-discovery');
 
 // ----- ROUTES -----
@@ -39,7 +39,7 @@ app.use('/api/files', fileRoutes);
 
 // ================= TEST =================
 app.get('/api/test', (req, res) => {
-    res.json({ message: "Backend + Upload API Working!" });
+    res.json({ message: "Backend + FTP Storage API Working!" });
 });
 
 // =====================================================
@@ -89,14 +89,15 @@ app.get("/api/files/transactions", (req, res) => {
 });
 
 // =====================================================
-// 👥 ACTIVE PEERS — now from LAN discovery
+// 👥 ACTIVE PEERS — from LAN discovery
 // =====================================================
 app.get("/api/files/peers", (req, res) => {
     const peers = discovery.getActivePeers().map(p => ({
         id: p.userId,
         username: p.username,
         ip: p.ip,
-        port: p.port
+        port: p.port,
+        ftpPort: p.ftpPort || FTP_PORT
     }));
     res.json({ peers });
 });
@@ -105,12 +106,15 @@ app.get("/api/files/peers", (req, res) => {
 // 🌐 MY SERVER INFO (so frontend knows own IP)
 // =====================================================
 app.get("/api/my-info", (req, res) => {
-    res.json(discovery.getMyInfo());
+    const info = discovery.getMyInfo();
+    res.json({
+        ...info,
+        ftpPort: FTP_PORT
+    });
 });
 
 // =====================================================
 // 💬 CHAT RELAY ENDPOINT
-// Called by remote servers to deliver messages to local users
 // =====================================================
 app.post("/api/chat/relay", (req, res) => {
     const data = req.body;
@@ -121,8 +125,6 @@ app.post("/api/chat/relay", (req, res) => {
     if (delivered) {
         res.json({ success: true });
     } else {
-        // Still return 200 so the sender does not get a relay-error toast
-        // The message was queued/broadcast as best-effort
         res.json({ success: false, warning: "User not found by userId, broadcast attempted" });
     }
 });
@@ -161,7 +163,7 @@ app.get("/api/user-activity/:userId", (req, res) => {
 });
 
 // =====================================================
-// 📂 MY FILES (for CID sharing in chat)
+// 📂 MY FILES (for file code sharing in chat)
 // =====================================================
 app.get("/api/files/my-files", (req, res) => {
     const authHeader = req.headers["authorization"];
@@ -186,11 +188,20 @@ app.get("/api/files/my-files", (req, res) => {
 });
 
 // =====================================================
-// 🔗 IPFS NODE STATUS
+// 📁 FTP SERVER STATUS
 // =====================================================
-app.get("/api/ipfs-status", async (req, res) => {
-    const status = await checkIPFSNode();
+app.get("/api/ftp-status", async (req, res) => {
+    const status = await getFTPStatus();
     res.json(status);
+});
+
+// Backward-compatible alias for cached clients
+app.get("/api/ipfs-status", async (req, res) => {
+    const status = await getFTPStatus();
+    res.json({
+        online: status.online,
+        version: "Traditional FTP Server (Port " + status.port + ")"
+    });
 });
 
 // ================= SOCKET.IO =================
@@ -206,8 +217,7 @@ const io = new Server(server, {
 const socketHandler = initSocket(io);
 
 // ================= START SERVER =================
-// ================= START SERVER =================
-const PORT = process.env.PORT || 5000;
+const PORT = 3000;
 
 server.listen(PORT, "0.0.0.0", () => {
     console.log("===========================================");
@@ -216,26 +226,26 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log("📡 Socket.IO + Auth + Upload + LAN Discovery Ready");
     console.log("===========================================");
 
-    // Check IPFS node connectivity on startup
-    checkIPFSNode().then(status => {
+    // Start traditional FTP server
+    startFTPServer().then(status => {
         if (status.online) {
-            console.log("✅ IPFS node online | ID:", status.id);
-            console.log("   Version:", status.version);
+            console.log("✅ Traditional FTP Server online on port " + status.port);
+            console.log("   Storage Root: " + status.storageDir);
         } else {
-            console.warn(
-                "⚠️ IPFS node NOT reachable at",
-                process.env.IPFS_API_URL || "http://127.0.0.1:5001"
-            );
-            console.warn(
-                "   Open IPFS Desktop and make sure its node is running."
-            );
+            console.warn("⚠️ FTP listener not active: " + (status.error || "Port unavailable"));
+            console.warn("   Web-based storage is fully operational.");
         }
+    }).catch(err => {
+        console.warn("FTP Server startup notice:", err.message);
     });
 
     // Start LAN UDP peer discovery
     discovery.start({
         port: PORT,
+        ftpPort: FTP_PORT,
         username: "Server",
         userId: "server"
     });
 });
+
+module.exports = { app, server };
